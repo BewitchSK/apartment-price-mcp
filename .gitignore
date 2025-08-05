@@ -41,6 +41,7 @@ coverage/
 *.swp
 *.swo
 *~
+apartment-price-mcp.iml
 
 # OS generated files
 .DS_Store
