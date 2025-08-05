@@ -25,50 +25,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'get_apartment_price',
-        description: '지역별 아파트 실거래가를 조회합니다',
+        description: '주소를 입력하면 해당 지역의 아파트 실거래가를 조회합니다',
         inputSchema: {
           type: 'object',
           properties: {
-            region: {
+            address: {
               type: 'string',
-              description: '조회할 지역명 (예: 강남구, 서초구)',
+              description: '조회할 주소 (예: 서울특별시 강남구, 경기도 성남시 분당구)',
             },
             apartment_name: {
               type: 'string',
-              description: '아파트명 (선택사항)',
+              description: '특정 아파트명 (선택사항)',
             },
-            year: {
+            api_key: {
               type: 'string',
-              description: '조회 연도 (YYYY 형식, 기본값: 현재년도)',
-            },
-            month: {
-              type: 'string',
-              description: '조회 월 (MM 형식, 기본값: 현재월)',
+              description: '공공데이터포털 API 키 (data.go.kr에서 발급)',
             },
           },
-          required: ['region'],
-        },
-      },
-      {
-        name: 'analyze_price_trend',
-        description: '특정 아파트의 가격 트렌드를 분석합니다',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            region: {
-              type: 'string',
-              description: '지역명',
-            },
-            apartment_name: {
-              type: 'string',
-              description: '아파트명',
-            },
-            period_months: {
-              type: 'number',
-              description: '분석 기간 (개월 수, 기본값: 12)',
-            },
-          },
-          required: ['region', 'apartment_name'],
+          required: ['address', 'api_key'],
         },
       },
     ],
@@ -83,9 +57,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case 'get_apartment_price':
         return await getApartmentPrice(args as any);
-
-      case 'analyze_price_trend':
-        return await analyzePriceTrend(args as any);
 
       default:
         throw new Error(`Unknown tool: ${name}`);
@@ -102,19 +73,145 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// 주소에서 지역코드 매핑
+const REGION_CODES: { [key: string]: string } = {
+  // 서울특별시
+  '강남구': '11680', '서초구': '11650', '송파구': '11710', '강동구': '11740',
+  '마포구': '11440', '용산구': '11170', '성동구': '11200', '광진구': '11215',
+  '동대문구': '11230', '중랑구': '11260', '성북구': '11290', '강북구': '11305',
+  '도봉구': '11320', '노원구': '11350', '은평구': '11380', '서대문구': '11410',
+  '종로구': '11110', '중구': '11140', '영등포구': '11560', '구로구': '11530',
+  '금천구': '11545', '양천구': '11470', '강서구': '11500', '관악구': '11620',
+  '동작구': '11590',
+
+  // 경기도 주요 지역
+  '수원시 영통구': '41117', '수원시 장안구': '41111', '수원시 권선구': '41113', '수원시 팔달구': '41115',
+  '성남시 수정구': '41131', '성남시 중원구': '41133', '성남시 분당구': '41135',
+  '고양시 덕양구': '41281', '고양시 일산동구': '41285', '고양시 일산서구': '41287',
+  '용인시 처인구': '41461', '용인시 기흥구': '41463', '용인시 수지구': '41465',
+  '부천시': '41190', '안산시 상록구': '41271', '안산시 단원구': '41273',
+  '안양시 만안구': '41171', '안양시 동안구': '41173',
+  '남양주시': '41360', '화성시': '41590', '평택시': '41220', '의정부시': '41150',
+  '시흥시': '41390', '파주시': '41480', '광명시': '41210', '김포시': '41570',
+  '군포시': '41410', '하남시': '41450', '오산시': '41370', '양주시': '41630',
+  '구리시': '41310', '안성시': '41550', '포천시': '41650', '의왕시': '41430',
+  '여주시': '41670', '동두천시': '41250', '과천시': '41290',
+};
+
+// 주소에서 지역코드 추출
+function getRegionCodeFromAddress(address: string): { code: string, region: string } | null {
+  const normalizedAddress = address.replace(/\s+/g, '').toLowerCase();
+
+  for (const [region, code] of Object.entries(REGION_CODES)) {
+    const normalizedRegion = region.replace(/\s+/g, '').toLowerCase();
+    if (normalizedAddress.includes(normalizedRegion)) {
+      return { code, region };
+    }
+  }
+
+  return null;
+}
+
+// 실제 공공 API 호출 함수
+async function fetchRealEstateData(regionCode: string, dealYmd: string, apiKey: string) {
+  const baseUrl = 'http://openapi.molit.go.kr/OpenAPI_ToolInstallPackage/service/rest/RTMSOBJSvc';
+
+  try {
+    const response = await axios.get(`${baseUrl}/getRTMSDataSvcAptTradeDev`, {
+      params: {
+        serviceKey: apiKey,
+        LAWD_CD: regionCode,
+        DEAL_YMD: dealYmd,
+        numOfRows: 100,
+        pageNo: 1,
+      },
+    });
+
+    return response.data;
+  } catch (error) {
+    console.error('API 호출 오류:', error);
+    return null;
+  }
+}
 // 아파트 실거래가 조회 함수
 async function getApartmentPrice(args: {
   region: string;
   apartment_name?: string;
   year?: string;
   month?: string;
+  api_key?: string;
 }) {
-  const { region, apartment_name, year, month } = args;
+  const { region, apartment_name, year, month, api_key } = args;
 
-  // 현재는 더미 데이터 반환 (나중에 실제 API 연동)
   const currentYear = year || new Date().getFullYear().toString();
   const currentMonth = month || (new Date().getMonth() + 1).toString().padStart(2, '0');
+  const dealYmd = currentYear + currentMonth;
 
+  // 지역코드 확인
+  const regionCode = REGION_CODES[region];
+  if (!regionCode) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `❌ 지원하지 않는 지역입니다: ${region}\n\n지원 지역: ${Object.keys(REGION_CODES).join(', ')}`,
+        },
+      ],
+    };
+  }
+
+  try {
+    // API 키가 있는 경우에만 실제 API 호출
+    if (api_key) {
+      const apiData = await fetchRealEstateData(regionCode, dealYmd, api_key);
+
+      if (apiData && apiData.response && apiData.response.body && apiData.response.body.items) {
+      // 실제 API 데이터 처리
+      const items = Array.isArray(apiData.response.body.items.item)
+        ? apiData.response.body.items.item
+        : [apiData.response.body.items.item];
+
+      let filteredItems = items;
+      if (apartment_name) {
+        filteredItems = items.filter((item: any) =>
+          item.아파트 && item.아파트.includes(apartment_name)
+        );
+      }
+
+      if (filteredItems.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `${region} 지역에서 ${apartment_name ? `'${apartment_name}' 관련 ` : ''}거래 내역을 찾을 수 없습니다.`,
+            },
+          ],
+        };
+      }
+
+      const result = filteredItems.slice(0, 10).map((item: any) =>
+        `📍 ${item.아파트 || '정보없음'} (${region})\n` +
+        `💰 거래가격: ${item.거래금액 || '정보없음'}만원\n` +
+        `📐 전용면적: ${item.전용면적 || '정보없음'}㎡\n` +
+        `🏢 층수: ${item.층 || '정보없음'}층\n` +
+        `📅 거래일: ${item.년 || currentYear}-${item.월 || currentMonth}-${item.일 || '정보없음'}\n` +
+        `🏗️ 건축년도: ${item.건축년도 || '정보없음'}\n`
+      ).join('\n---\n');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `${region} 지역 아파트 실거래가 정보 (${currentYear}년 ${currentMonth}월):\n\n${result}`,
+          },
+        ],
+      };
+    }
+  } catch (error) {
+    console.error('API 호출 중 오류:', error);
+  }
+
+  // API 호출 실패 시 더미 데이터 반환
   const mockData = [
     {
       apartmentName: apartment_name || '래미안아파트',
@@ -152,54 +249,7 @@ async function getApartmentPrice(args: {
     content: [
       {
         type: 'text',
-        text: `${region} 지역 아파트 실거래가 정보:\n\n${result}`,
-      },
-    ],
-  };
-}
-
-// 가격 트렌드 분석 함수
-async function analyzePriceTrend(args: {
-  region: string;
-  apartment_name: string;
-  period_months?: number;
-}) {
-  const { region, apartment_name, period_months = 12 } = args;
-
-  // 더미 트렌드 데이터
-  const trendData = Array.from({ length: period_months }, (_, i) => {
-    const date = new Date();
-    date.setMonth(date.getMonth() - (period_months - 1 - i));
-    const basePrice = 80000;
-    const variation = Math.sin(i * 0.5) * 5000 + Math.random() * 3000;
-
-    return {
-      month: date.toISOString().slice(0, 7),
-      avgPrice: Math.round(basePrice + variation),
-      transactionCount: Math.floor(Math.random() * 10) + 1,
-    };
-  });
-
-  const trend = trendData.map(item =>
-    `${item.month}: ${item.avgPrice.toLocaleString()}만원 (거래 ${item.transactionCount}건)`
-  ).join('\n');
-
-  const firstPrice = trendData[0].avgPrice;
-  const lastPrice = trendData[trendData.length - 1].avgPrice;
-  const priceChange = lastPrice - firstPrice;
-  const changePercentNum = (priceChange / firstPrice) * 100;
-  const changePercent = changePercentNum.toFixed(1);
-
-  return {
-    content: [
-      {
-        type: 'text',
-        text: `${apartment_name} (${region}) ${period_months}개월 가격 트렌드:\n\n${trend}\n\n` +
-              `📊 분석 결과:\n` +
-              `• 시작 가격: ${firstPrice.toLocaleString()}만원\n` +
-              `• 현재 가격: ${lastPrice.toLocaleString()}만원\n` +
-              `• 변동폭: ${priceChange > 0 ? '+' : ''}${priceChange.toLocaleString()}만원 (${changePercentNum > 0 ? '+' : ''}${changePercent}%)\n` +
-              `• 추세: ${priceChange > 0 ? '상승📈' : priceChange < 0 ? '하락📉' : '보합➡️'}`,
+        text: `${region} 지역 아파트 실거래가 정보 (API 연결 실패 - 샘플 데이터):\n\n${result}`,
       },
     ],
   };
